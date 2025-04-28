@@ -1,17 +1,21 @@
-# 使用官方 Python 镜像
-FROM python:3.10-slim
+# 使用官方 Python 作为基础镜像
+FROM python:3.9-slim
 
 # 设置工作目录
 WORKDIR /app
 
-# 复制项目所有文件
+# 复制项目文件到容器内
 COPY . /app
 
-# 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 创建并激活虚拟环境
+RUN python -m venv /venv
 
-# 设置 Python 输出不缓冲
-ENV PYTHONUNBUFFERED=1
+# 激活虚拟环境并安装依赖
+RUN /venv/bin/pip install --upgrade pip && \
+    /venv/bin/pip install -r requirements.txt
 
-# 默认启动程序
+# 设置环境变量，确保程序可以找到虚拟环境
+ENV PATH="/venv/bin:$PATH"
+
+# 容器启动时执行 rate_monitor.py
 CMD ["python", "rate_monitor.py"]
