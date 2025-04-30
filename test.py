@@ -1,9 +1,16 @@
 from pymongo import MongoClient
+class BinanceFundingRateTracker:
+    def __init__(self):
+        self.client = MongoClient("mongodb://localhost:27017/")
+        self.db = self.client["funding_monitor"]
+        self.users_collection = self.db["users"]
 
-client = MongoClient("mongodb://localhost:27017/")
-db = client["funding_monitor"]
-oi_collection = db["open_interest"]
+    def clear_user_database(self):
+        """清空用户数据库中的所有记录"""
+        result = self.users_collection.delete_many({})
+        print(f"清空了 {result.deleted_count} 条用户数据。")
 
-# 清空集合
-oi_collection.delete_many({})
-print("已清空 open_interest 集合")
+# 示例：清空数据库
+if __name__ == "__main__":
+    tracker = BinanceFundingRateTracker()
+    tracker.clear_user_database()

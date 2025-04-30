@@ -11,7 +11,7 @@ import telegram
 from dotenv import load_dotenv
 from telegram.ext import Updater, MessageHandler, Filters
 from telegram import ReplyKeyboardMarkup
-
+from telegram.ext import CommandHandler, Updater
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -25,20 +25,110 @@ class BinanceFundingRateTracker:
         self.previous_rates = {}  # 初始化 previous_rates，避免属性不存在
         self.client = MongoClient("mongodb://localhost:27017/")
         self.db = self.client["funding_monitor"]
+        
+        # 初始化用户集合（用于保存chat_id和付费状态）
+        self.users_collection = self.db["users"]
+        
         # 初始化 Telegram Bot
         self.telegram_bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        
+        # 获取所有用户信息
+        self.all_users = self.users_collection.find()
         
         # 启动 telegram 消息监听（用于处理菜单按钮点击）
         self.updater = Updater(token=self.telegram_bot.token, use_context=True)
-        dispatcher = self.updater.dispatcher
-
-        def respond(update, context):
-            response = self.handle_message(update.message.text)
-            context.bot.send_message(chat_id=update.effective_chat.id, text=response)
-
-        dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), respond))
+        
+        # 直接通过 self.updater 获取 dispatcher
+        self.dispatcher = self.updater.dispatcher
+        
+        # 注册 /start 命令处理器
+        self.dispatcher.add_handler(CommandHandler('start', self.start))
+        
+        # 注册其他的消息处理器
+        self.dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), self.respond))
+        
+        # 启动轮询
         self.updater.start_polling()
+
+    def start(self, update, context):
+        """
+        处理 /start 命令，发送菜单给用户
+        """
+        # 给用户发送菜单
+        keyboard = [
+            ['📈 资金费率最高（Top10）', '📉 资金费率最低（Top10）'],
+            ['📣 最近告警记录', '📊 市场情绪指数'],
+            ['⚡ 资金变化最快（Top10）', '📊 热门合约榜（高费率 + 高成交额）']
+        ]
+        reply_markup = telegram.ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        # 发送菜单
+        context.bot.send_message(
+            chat_id=update.message.chat.id,
+            text="🤖 请选择一个操作 👇",
+            reply_markup=reply_markup
+        )
+        
+        # 保存用户 ID 和 chat_id
+        user_id = update.message.from_user.id
+        user_chat_id = update.message.chat.id
+        self.save_user_chat_id(user_id, user_chat_id)
+
+    def respond(self, update, context):
+        """
+        处理用户发送的消息，判断是否为付费用户并返回响应
+        """
+        user_id = update.message.from_user.id
+        user_chat_id = update.message.chat.id  # 获取用户的chat_id
+        self.save_user_chat_id(user_id, user_chat_id)  # 保存chat_id到数据库
+
+        if self.is_user_paid(user_id):
+            response = self.handle_message(update.message.text, user_id)
+            context.bot.send_message(chat_id=update.effective_chat.id, text=response)
+        else:
+            # 非付费用户，提供简易反馈或限制功能
+            context.bot.send_message(chat_id=update.effective_chat.id, text="您尚未订阅付费服务，无法访问所有功能。")
+
+    def save_user_chat_id(self, user_id: int, chat_id: int):
+        """保存用户的 chat_id，但如果 chat_id 已经存在则跳过"""
+        # 检查用户是否已经存在于数据库中
+        existing_user = self.users_collection.find_one({"user_id": user_id})
+        
+        if existing_user:
+            print(f"User {user_id} already exists with chat_id {chat_id}. Skipping save.")
+        else:
+            # 用户不存在，保存用户信息
+            self.users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"chat_id": chat_id,"paid": True}},
+                upsert=True
+            )
+            print(f"User {user_id} chat_id {chat_id} saved.")
+
+    def is_user_paid(self, user_id: int) -> bool:
+        """检查用户是否为付费用户"""
+        user_data = self.users_collection.find_one({"user_id": user_id})
+        return user_data and user_data.get("paid", False)
+    
+    # 添加付费状态
+    def add_to_paid_users(self, user_id: int):
+        """将用户添加为付费用户"""
+        self.users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"paid": True}},
+            upsert=True
+        )
+        return "用户已成功升级为付费用户！"
+
+    # 从付费用户中移除
+    def remove_from_paid_users(self, user_id: int):
+        """将用户移除付费状态"""
+        self.users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"paid": False}},
+            upsert=True
+        )
+        return "用户已成功取消付费状态！"
 
     def safe_request(self, url, params=None, timeout=10):
         """封装请求，支持自动重试"""
@@ -70,7 +160,7 @@ class BinanceFundingRateTracker:
 
 
 
-    def handle_message(self, message_text: str):
+    def handle_message(self, message_text: str,user_id: int):
         try:
             if message_text in ["📈 资金费率最高（Top10）", "📉 资金费率最低（Top10）", "📈 排行榜（高费率）"]:
                 latest = self.fetch_latest_stats()
@@ -444,7 +534,7 @@ class BinanceFundingRateTracker:
         
     # 获取当前上海时间戳
     def run_task(self):
-        if not self.telegram_bot.token or not self.telegram_chat_id:
+        if not self.telegram_bot.token:
             raise ValueError("Telegram bot token or chat ID is not set.")
         
         timestamp = self.get_shanghai_timestamp()
@@ -562,26 +652,43 @@ class BinanceFundingRateTracker:
         except Exception as e:
             print(f"Error calculating market sentiment: {e}")
 
+    def send_menu_to_all_users(self):
+        # 发送自定义菜单按钮（提前）
+        keyboard = [
+            ['📈 资金费率最高（Top10）', '📉 资金费率最低（Top10）'],
+            ['📣 最近告警记录', '📊 市场情绪指数'],
+            ['⚡ 资金变化最快（Top10）', '📊 热门合约榜（高费率 + 高成交额）']
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        # 获取所有用户
+        all_users_list = list(self.all_users)
+        
+        # 输出用户总数
+        print(f"Total users: {len(all_users_list)}")
+        
+        # 遍历所有用户并发送菜单
+        for user in all_users_list:
+            chat_id = user.get("chat_id")
+            print(f"Processing chat_id: {chat_id}")  # 输出正在处理的 chat_id
+            
+            if chat_id:
+                try:
+                    self.telegram_bot.send_message(
+                        chat_id=chat_id,
+                        text="🤖 请选择一个操作 👇",
+                        reply_markup=reply_markup  # 使用局部变量 reply_markup
+                    )
+                    print(f"Menu sent to user with chat_id: {chat_id}")
+                except Exception as e:
+                    print(f"Error sending message to {chat_id}: {e}")
 
 if __name__ == "__main__":
     tracker = BinanceFundingRateTracker()
-    
-    # 发送自定义菜单按钮（提前）
-    keyboard = [
-        ['📈 资金费率最高（Top10）', '📉 资金费率最低（Top10）'],
-        ['📣 最近告警记录', '📊 市场情绪指数'],
-        ['⚡ 资金变化最快（Top10）', '📊 热门合约榜（高费率 + 高成交额）']
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    try:
-        tracker.telegram_bot.send_message(
-            chat_id=tracker.telegram_chat_id,
-            text="🤖 请选择一个操作 👇",
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        print(f"Telegram menu message failed: {e}")
+        # 发送菜单给所有用户
+    tracker.send_menu_to_all_users()
+
+        # 获取所有用户的 chat_id
     
     # 立即运行一次
     tracker.run_task()
