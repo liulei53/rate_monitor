@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 import schedule
 from typing import Dict, List, Tuple, Optional
-import pytz  # 添加 pytz 库
+import pytz  
 from pymongo import MongoClient
 import telegram
 from dotenv import load_dotenv
@@ -560,6 +560,9 @@ class BinanceFundingRateTracker:
             db = client["funding_monitor"]
             alerts_collection = db["funding_alerts"]
 
+            # 重新获取最新的用户列表，确保数据最新
+            paid_users = self.users_collection.find({"paid": True})
+
             alert_lines = [f"🚨 **资金费率预警**（{timestamp}）"]
             abnormal_rates = []
             violent_changes = []
@@ -623,9 +626,23 @@ class BinanceFundingRateTracker:
             if violent_changes:
                 alert_lines.append("\n💥 **剧烈波动提醒**")
                 alert_lines.extend(violent_changes)
+            # 当有告警时，发送给所有付费用户
             if len(alert_lines) > 1:
                 message = "\n".join(alert_lines)
-                self.telegram_bot.send_message(chat_id=self.telegram_chat_id, text=message, parse_mode="Markdown")
+                for user in paid_users:
+                    chat_id = user.get("chat_id")
+                    if chat_id:
+                        try:
+                            self.telegram_bot.send_message(
+                                chat_id=chat_id, 
+                                text=message, 
+                                parse_mode="Markdown"
+                            )
+                            print(f"Alert sent to user {chat_id}")
+                        except Exception as e:
+                            print(f"Failed to send alert to user {chat_id}: {e}")
+                
+                print(f"Alerts sent to {paid_users.count()} paid users")
         except Exception as e:
             print(f"Telegram alert failed: {e}")
         print("完成 Telegram 异常告警检查")
@@ -688,8 +705,6 @@ if __name__ == "__main__":
         # 发送菜单给所有用户
     tracker.send_menu_to_all_users()
 
-        # 获取所有用户的 chat_id
-    
     # 立即运行一次
     tracker.run_task()
 
